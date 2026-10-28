@@ -12,42 +12,302 @@ const INITIAL_STATUS = {
 const MAX_PROMPT = 4000;
 const PROVIDERS = ['groq', 'gemini', 'openai'];
 
-function parseAnswer(raw) {
-  if (!raw) return { summary: '', points: [], notes: [] };
-  const lines = raw.split('\n');
-  let summary = '';
-  const points = [];
-  const notes = [];
-  let isParsingPoints = false;
+// Format inline markdown (inline code, bold, italic)
+function formatInlineText(text) {
+  if (!text) return null;
+  const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+  const parts = [];
+  let lastIdx = 0;
+  let match;
+  let k = 0;
 
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed) continue;
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIdx) {
+      parts.push(text.slice(lastIdx, match.index));
+    }
+    const token = match[0];
+    if (token.startsWith('`') && token.endsWith('`')) {
+      parts.push(
+        <code key={k++} className="inline-code">
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else if (token.startsWith('**') && token.endsWith('**')) {
+      parts.push(
+        <strong key={k++} className="inline-bold">
+          {token.slice(2, -2)}
+        </strong>
+      );
+    } else if (token.startsWith('*') && token.endsWith('*')) {
+      parts.push(<em key={k++}>{token.slice(1, -1)}</em>);
+    }
+    lastIdx = regex.lastIndex;
+  }
 
-    if (trimmed.startsWith('•') || trimmed.startsWith('-') || trimmed.startsWith('*') || /^\d+\./.test(trimmed)) {
-      isParsingPoints = true;
-      const cleaned = trimmed.replace(/^[•\-*]\s*|^\d+\.\s*/, '');
-      const colonIdx = cleaned.indexOf(':');
-      if (colonIdx > 0 && colonIdx < 35) {
-        points.push({
-          label: cleaned.slice(0, colonIdx).replace(/\*\*/g, '').trim(),
-          content: cleaned.slice(colonIdx + 1).trim()
-        });
-      } else {
-        points.push({ label: '', content: cleaned });
+  if (lastIdx < text.length) {
+    parts.push(text.slice(lastIdx));
+  }
+
+  return parts;
+}
+
+// Parse text chunks into structured headings, tables, blockquotes, lists, and paragraphs
+function parseTextBlocks(chunk, prefix) {
+  const blocks = [];
+  const lines = chunk.replace(/\r\n/g, '\n').split('\n');
+  let i = 0;
+  let subId = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      i++;
+      continue;
+    }
+
+    // 1. Table: consecutive lines starting with '|' and ending with '|'
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      const tableLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('|') && lines[i].trim().endsWith('|')) {
+        tableLines.push(lines[i].trim());
+        i++;
       }
-    } else if (!isParsingPoints && !summary) {
-      summary = trimmed.replace(/\*\*/g, '');
-    } else {
-      notes.push(trimmed);
+      if (tableLines.length >= 2) {
+        blocks.push({
+          type: 'table',
+          id: `${prefix}_tbl_${subId++}`,
+          lines: tableLines
+        });
+        continue;
+      }
+    }
+
+    // 2. Blockquote: consecutive lines starting with '>'
+    if (trimmed.startsWith('>')) {
+      const quoteLines = [];
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+        i++;
+      }
+      blocks.push({
+        type: 'blockquote',
+        id: `${prefix}_bq_${subId++}`,
+        content: quoteLines.join('\n')
+      });
+      continue;
+    }
+
+    // 3. Headings: '#', '##', '###'
+    const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+    if (headingMatch) {
+      blocks.push({
+        type: 'heading',
+        id: `${prefix}_h_${subId++}`,
+        level: headingMatch[1].length,
+        text: headingMatch[2]
+      });
+      i++;
+      continue;
+    }
+
+    // 4. List items: '1. ', '2. ', '- ', '* ', '• '
+    const listMatch = trimmed.match(/^(\d+\.|[•\-*])\s+(.+)$/);
+    if (listMatch) {
+      blocks.push({
+        type: 'list_item',
+        id: `${prefix}_li_${subId++}`,
+        bullet: listMatch[1],
+        content: listMatch[2]
+      });
+      i++;
+      continue;
+    }
+
+    // 5. Paragraph text: accumulate regular lines
+    const pLines = [line];
+    i++;
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !lines[i].trim().startsWith('```') &&
+      !lines[i].trim().startsWith('|') &&
+      !lines[i].trim().startsWith('>') &&
+      !lines[i].trim().match(/^#{1,4}\s+/) &&
+      !lines[i].trim().match(/^(\d+\.|[•\-*])\s+/)
+    ) {
+      pLines.push(lines[i]);
+      i++;
+    }
+    blocks.push({
+      type: 'paragraph',
+      id: `${prefix}_p_${subId++}`,
+      content: pLines.join(' ')
+    });
+  }
+
+  return blocks;
+}
+
+// Split full response into code blocks and text blocks
+function parseMarkdown(raw) {
+  if (!raw) return [];
+  const blocks = [];
+  const codeRegex = /```([a-zA-Z0-9_-]*)\r?\n([\s\S]*?)```/g;
+  let lastIndex = 0;
+  let match;
+  let blockId = 0;
+
+  while ((match = codeRegex.exec(raw)) !== null) {
+    if (match.index > lastIndex) {
+      const textChunk = raw.slice(lastIndex, match.index);
+      if (textChunk.trim()) {
+        blocks.push(...parseTextBlocks(textChunk, `b_${blockId++}`));
+      }
+    }
+    blocks.push({
+      type: 'code',
+      id: `code_${blockId++}`,
+      language: (match[1] || 'code').trim(),
+      code: match[2].replace(/\r\n/g, '\n').replace(/\n$/, '')
+    });
+    lastIndex = codeRegex.lastIndex;
+  }
+
+  if (lastIndex < raw.length) {
+    const trailing = raw.slice(lastIndex);
+    if (trailing.trim()) {
+      blocks.push(...parseTextBlocks(trailing, `b_${blockId++}`));
     }
   }
 
-  return {
-    summary: summary || (points.length === 0 ? raw : ''),
-    points,
-    notes
-  };
+  return blocks;
+}
+
+// Code Block Component with 1-click Copy and exact indentation preservation
+function CodeBlock({ id, language, code, onCopy, isCopied }) {
+  return (
+    <div className="formatted-code-container">
+      <div className="code-header">
+        <span className="code-lang-tag">{language || 'code'}</span>
+        <button
+          className="code-copy-btn"
+          onClick={() => onCopy(id, code)}
+          type="button"
+          title="Copy code to clipboard"
+        >
+          {isCopied ? (
+            <span className="copied-label">Copied!</span>
+          ) : (
+            <>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+              </svg>
+              <span>Copy code</span>
+            </>
+          )}
+        </button>
+      </div>
+      <pre className="code-pre">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+// Table Component
+function TableBlock({ lines }) {
+  const rows = lines.map((l) =>
+    l.split('|').slice(1, -1).map((c) => c.trim())
+  );
+  if (rows.length === 0) return null;
+  const header = rows[0];
+  const isSep = rows.length > 1 && rows[1].every((c) => /^[-:\s]+$/.test(c));
+  const data = isSep ? rows.slice(2) : rows.slice(1);
+
+  return (
+    <div className="table-wrapper">
+      <table className="formatted-table">
+        <thead>
+          <tr>
+            {header.map((col, idx) => (
+              <th key={idx}>{formatInlineText(col)}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.map((row, rIdx) => (
+            <tr key={rIdx}>
+              {row.map((cell, cIdx) => (
+                <td key={cIdx}>{formatInlineText(cell)}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Full Markdown Answer Renderer Component
+function FormattedAnswer({ text, onCopy, copiedId }) {
+  const blocks = useMemo(() => parseMarkdown(text), [text]);
+
+  if (!blocks || blocks.length === 0) {
+    return <div className="formatted-paragraph">{text}</div>;
+  }
+
+  return (
+    <div className="formatted-answer-body">
+      {blocks.map((block) => {
+        switch (block.type) {
+          case 'code':
+            return (
+              <CodeBlock
+                key={block.id}
+                id={block.id}
+                language={block.language}
+                code={block.code}
+                onCopy={onCopy}
+                isCopied={copiedId === block.id}
+              />
+            );
+          case 'table':
+            return <TableBlock key={block.id} lines={block.lines} />;
+          case 'blockquote':
+            return (
+              <blockquote key={block.id} className="formatted-blockquote">
+                {formatInlineText(block.content)}
+              </blockquote>
+            );
+          case 'heading': {
+            const HeadingTag = block.level <= 2 ? 'h3' : 'h4';
+            return (
+              <HeadingTag key={block.id} className="formatted-heading">
+                {formatInlineText(block.text)}
+              </HeadingTag>
+            );
+          }
+          case 'list_item':
+            return (
+              <div key={block.id} className="formatted-list-item">
+                <span className="list-bullet">{block.bullet}</span>
+                <div className="list-content">{formatInlineText(block.content)}</div>
+              </div>
+            );
+          case 'paragraph':
+          default:
+            return (
+              <p key={block.id} className="formatted-paragraph">
+                {formatInlineText(block.content)}
+              </p>
+            );
+        }
+      })}
+    </div>
+  );
 }
 
 function formatTime(timestamp) {
@@ -69,12 +329,13 @@ export default function App() {
   const [isExpanded, setIsExpanded] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [thumbsFeedback, setThumbsFeedback] = useState({}); // { [pairId]: 'up' | 'down' }
+  const [selectedTextBanner, setSelectedTextBanner] = useState('');
 
   const [provider, setProvider] = useState(import.meta.env.VITE_PROVIDER || 'groq');
   const [model, setModel] = useState(import.meta.env.VITE_MODEL || '');
   const [models, setModels] = useState({
     groq: import.meta.env.VITE_GROQ_MODEL || import.meta.env.VITE_MODEL || 'llama-3.3-70b-versatile',
-    gemini: import.meta.env.VITE_GEMINI_MODEL || 'gemini-1.5-flash',
+    gemini: import.meta.env.VITE_GEMINI_MODEL || 'gemini-3.8-flash',
     openai: import.meta.env.VITE_OPENAI_MODEL || 'gpt-4o-mini'
   });
 
@@ -84,9 +345,10 @@ export default function App() {
 
   const bufferRef = useRef('');
   const loadingRef = useRef(false);
-  const submitRef = useRef(() => {});
+  const submitRef = useRef(() => { });
   const chatScrollRef = useRef(null);
   const textareaRef = useRef(null);
+  const lastProcessedClipRef = useRef('');
 
   // Group messages into question-answer pairs
   const historyPairs = useMemo(() => {
@@ -113,7 +375,7 @@ export default function App() {
     return pairs;
   }, [sessionState.messages]);
 
-  // Auto-scroll chat to bottom when messages change or while loading
+  // Auto-scroll chat to bottom
   const scrollToBottom = useCallback((smooth = true) => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTo({
@@ -147,17 +409,70 @@ export default function App() {
     adjustTextareaHeight();
   }, [input, adjustTextareaHeight]);
 
-  const appendText = useCallback(
+  // Cursor-aware insertion & backspace for seamless in-place editing
+  const insertTextAtCursor = useCallback(
     (text) => {
-      const next = (bufferRef.current + text).slice(0, MAX_PROMPT);
-      setBuffer(next);
+      const el = textareaRef.current;
+      if (el) {
+        const start = el.selectionStart ?? el.value.length;
+        const end = el.selectionEnd ?? el.value.length;
+        const current = el.value;
+        const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
+        setBuffer(next);
+        const nextPos = Math.min(start + text.length, MAX_PROMPT);
+        setTimeout(() => {
+          if (el) {
+            el.focus();
+            el.setSelectionRange(nextPos, nextPos);
+          }
+        }, 0);
+      } else {
+        const next = (bufferRef.current + text).slice(0, MAX_PROMPT);
+        setBuffer(next);
+      }
     },
     [setBuffer]
   );
 
-  const backspace = useCallback(() => {
-    setBuffer(bufferRef.current.slice(0, -1));
+  const backspaceAtCursor = useCallback(() => {
+    const el = textareaRef.current;
+    if (el) {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const current = el.value;
+      if (start !== end) {
+        const next = current.slice(0, start) + current.slice(end);
+        setBuffer(next);
+        setTimeout(() => {
+          if (el) {
+            el.focus();
+            el.setSelectionRange(start, start);
+          }
+        }, 0);
+      } else if (start > 0) {
+        const next = current.slice(0, start - 1) + current.slice(start);
+        setBuffer(next);
+        setTimeout(() => {
+          if (el) {
+            el.focus();
+            el.setSelectionRange(start - 1, start - 1);
+          }
+        }, 0);
+      }
+    } else {
+      setBuffer(bufferRef.current.slice(0, -1));
+    }
   }, [setBuffer]);
+
+  // Auto-focus input on mount
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+      }
+    }, 150);
+    return () => clearTimeout(timer);
+  }, []);
 
   const refreshSession = useCallback(async () => {
     try {
@@ -167,7 +482,7 @@ export default function App() {
           setSessionState(state);
         }
       }
-    } catch {}
+    } catch { }
   }, []);
 
   const refreshKeys = useCallback(async () => {
@@ -176,7 +491,7 @@ export default function App() {
         const k = await window.assistant.keysStatus();
         if (k) setKeys(k);
       }
-    } catch {}
+    } catch { }
   }, []);
 
   const submit = useCallback(async () => {
@@ -189,7 +504,6 @@ export default function App() {
     setError('');
     setBuffer('');
 
-    // Reset textarea height to 1 line
     if (textareaRef.current) {
       textareaRef.current.style.height = '34px';
     }
@@ -226,13 +540,13 @@ export default function App() {
     };
   }, [historyPairs]);
 
-  // Assistant overlay keyboard routing
+  // Overlay keyboard listener
   useEffect(() => {
     if (!window.assistant || !window.assistant.onKey) return;
     const removeKey = window.assistant.onKey((payload) => {
       if (!payload) return;
       if (payload.key === 'Backspace') {
-        backspace();
+        backspaceAtCursor();
         return;
       }
       if (payload.key === 'Enter') {
@@ -240,11 +554,11 @@ export default function App() {
         return;
       }
       if (typeof payload.text === 'string') {
-        appendText(payload.text);
+        insertTextAtCursor(payload.text);
       }
     });
     return removeKey;
-  }, [appendText, backspace]);
+  }, [insertTextAtCursor, backspaceAtCursor]);
 
   // Status & polling
   useEffect(() => {
@@ -255,7 +569,7 @@ export default function App() {
         .then((next) => {
           if (alive && next) setStatus((current) => ({ ...current, ...next }));
         })
-        .catch(() => {});
+        .catch(() => { });
     }
 
     const removeStatus = window.assistant?.onStatus?.((next) => {
@@ -266,6 +580,31 @@ export default function App() {
       setStatus((current) => ({ ...current, foreground }));
     });
 
+    const removeClipboard = window.assistant?.onClipboardChanged?.((newText) => {
+      if (typeof newText === 'string' && newText.trim().length > 0 && newText.trim() !== bufferRef.current.trim() && newText.trim() !== lastProcessedClipRef.current) {
+        lastProcessedClipRef.current = newText.trim();
+        setSelectedTextBanner(newText.trim());
+      }
+    });
+
+    // Check clipboard periodically when selecting text in browser tab
+    const checkClipboard = async () => {
+      try {
+        const text = await window.assistant?.getClipboard?.();
+        if (
+          typeof text === 'string' &&
+          text.trim().length > 0 &&
+          text.trim() !== bufferRef.current.trim() &&
+          text.trim() !== lastProcessedClipRef.current
+        ) {
+          lastProcessedClipRef.current = text.trim();
+          setSelectedTextBanner(text.trim());
+        }
+      } catch { }
+    };
+
+    const clipInterval = setInterval(checkClipboard, 600);
+
     refreshSession();
     refreshKeys();
 
@@ -273,10 +612,40 @@ export default function App() {
       alive = false;
       removeStatus?.();
       removeForeground?.();
+      removeClipboard?.();
+      clearInterval(clipInterval);
     };
   }, [refreshSession, refreshKeys]);
 
-  // Copy to clipboard helper
+  // Paste selected text from browser into input at cursor position
+  const handlePasteSelected = useCallback(
+    (textToPaste) => {
+      const text = typeof textToPaste === 'string' ? textToPaste : selectedTextBanner;
+      if (!text) return;
+      const el = textareaRef.current;
+      if (el) {
+        const start = el.selectionStart ?? el.value.length;
+        const end = el.selectionEnd ?? el.value.length;
+        const current = el.value;
+        const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
+        setBuffer(next);
+        setSelectedTextBanner('');
+        const nextPos = Math.min(start + text.length, MAX_PROMPT);
+        setTimeout(() => {
+          el.focus();
+          el.setSelectionRange(nextPos, nextPos);
+        }, 0);
+      } else {
+        const current = bufferRef.current;
+        const next = current ? `${current}\n${text}` : text;
+        setBuffer(next.slice(0, MAX_PROMPT));
+        setSelectedTextBanner('');
+      }
+    },
+    [selectedTextBanner, setBuffer]
+  );
+
+  // Copy helper
   const handleCopy = useCallback((id, text) => {
     if (!text) return;
     navigator.clipboard?.writeText?.(text);
@@ -293,7 +662,7 @@ export default function App() {
     setIsExpanded(nextState);
     if (window.assistant?.resizeWindow) {
       if (nextState) {
-        await window.assistant.resizeWindow({ width: 740, height: 840 });
+        await window.assistant.resizeWindow({ width: 760, height: 860 });
       } else {
         await window.assistant.resizeWindow({ width: 580, height: 660 });
       }
@@ -318,7 +687,7 @@ export default function App() {
       }
       setBuffer('');
       setError('');
-    } catch {}
+    } catch { }
   }, [setBuffer]);
 
   // Interactive corner drag resizing
@@ -351,7 +720,7 @@ export default function App() {
     window.addEventListener('mouseup', onMouseUp);
   }, []);
 
-  // Textarea keyboard handling (Enter sends, Shift+Enter adds newline)
+  // Textarea Enter key handling
   const handleTextareaKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -475,13 +844,19 @@ export default function App() {
               <div className="welcome-lead">
                 <span className="answer-icon">⭐</span>
                 <strong>Welcome to Floating Assistant</strong>
-                <p>Ask any question or interview query. All questions and answers will be saved in this conversation stream.</p>
+                <p>Ask any programming question, interview problem, or query. All answers will be formatted cleanly with proper code blocks and indentation.</p>
               </div>
               <ul className="answer-bullets">
                 <li className="bullet-item">
                   <span className="bullet-dot">•</span>
                   <div className="bullet-text">
-                    <strong>Conversation History:</strong> All previous questions & answers stay in this dialog without needing to click previous/next.
+                    <strong>Code Blocks:</strong> Formatted with monospace font, exact indentation, language labels, and a 1-click Copy button.
+                  </div>
+                </li>
+                <li className="bullet-item">
+                  <span className="bullet-dot">•</span>
+                  <div className="bullet-text">
+                    <strong>Continuous History:</strong> All questions and answers stay together in one scrollable thread.
                   </div>
                 </li>
                 <li className="bullet-item">
@@ -490,21 +865,12 @@ export default function App() {
                     <strong>Stretchable Input:</strong> Simple multi-line input box below that expands up to 4 lines with a clean scrollbar.
                   </div>
                 </li>
-                <li className="bullet-item">
-                  <span className="bullet-dot">•</span>
-                  <div className="bullet-text">
-                    <strong>Scrollable:</strong> Scroll up and down comfortably over the full answer history.
-                  </div>
-                </li>
               </ul>
             </div>
           ) : null}
 
           {/* Render all question-answer pairs sequentially in same dialog */}
           {historyPairs.map((pair, idx) => {
-            const parsed = parseAnswer(pair.answer);
-            const isLatest = idx === historyPairs.length - 1;
-
             return (
               <div key={pair.id || idx} className="chat-turn-item">
                 {/* QUESTION BLOCK */}
@@ -534,7 +900,7 @@ export default function App() {
                   <div className="question-body-text">{pair.question}</div>
                 </div>
 
-                {/* ANSWER BLOCK */}
+                {/* ANSWER BLOCK WITH MARKDOWN & CODE BLOCKS */}
                 {pair.answer ? (
                   <div className="turn-answer-card">
                     <div className="answer-header">
@@ -546,7 +912,7 @@ export default function App() {
                       <button
                         className="copy-mini-btn"
                         onClick={() => handleCopy(`a_${idx}`, pair.answer)}
-                        title={copiedId === `a_${idx}` ? 'Copied!' : 'Copy answer'}
+                        title={copiedId === `a_${idx}` ? 'Copied!' : 'Copy full answer'}
                         type="button"
                       >
                         {copiedId === `a_${idx}` ? (
@@ -560,41 +926,12 @@ export default function App() {
                       </button>
                     </div>
 
-                    <div className="answer-body-content">
-                      {/* Lead Summary */}
-                      {parsed.summary && (
-                        <div className="answer-lead-line">
-                          <strong>Summary: </strong>
-                          <span>{parsed.summary}</span>
-                        </div>
-                      )}
-
-                      {/* Bullet points */}
-                      {parsed.points && parsed.points.length > 0 && (
-                        <ul className="answer-bullets">
-                          {parsed.points.map((pt, pIdx) => (
-                            <li key={pIdx} className="bullet-item">
-                              <span className="bullet-dot">•</span>
-                              <div className="bullet-text">
-                                {pt.label && <strong>{pt.label}: </strong>}
-                                <span>{pt.content}</span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-
-                      {/* Additional notes/callouts */}
-                      {parsed.notes && parsed.notes.length > 0 && (
-                        <div className="answer-callouts">
-                          {parsed.notes.map((note, nIdx) => (
-                            <div key={nIdx} className="callout-box">
-                              {note}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
+                    {/* Properly formatted markdown content (headings, code blocks, tables, lists, quotes) */}
+                    <FormattedAnswer
+                      text={pair.answer}
+                      onCopy={handleCopy}
+                      copiedId={copiedId}
+                    />
 
                     {/* Turn Footer with Thumbs Feedback */}
                     <div className="turn-footer-row">
@@ -695,8 +1032,44 @@ export default function App() {
         </div>
       </div>
 
+      {/* FLOATING BROWSER SELECTION PASTE BANNER */}
+      {selectedTextBanner ? (
+        <div className="parakeet-paste-banner">
+          <div className="paste-banner-info">
+            <span className="paste-banner-icon">📋</span>
+            <span className="paste-banner-title">Selected in browser:</span>
+            <span className="paste-banner-snippet">
+              "{selectedTextBanner.slice(0, 65).replace(/\s+/g, ' ')}{selectedTextBanner.length > 65 ? '…' : ''}"
+            </span>
+          </div>
+          <div className="paste-banner-actions">
+            <button
+              className="paste-confirm-btn no-drag"
+              onClick={() => handlePasteSelected(selectedTextBanner)}
+              type="button"
+            >
+              Paste
+            </button>
+            <button
+              className="paste-dismiss-btn no-drag"
+              onClick={() => setSelectedTextBanner('')}
+              title="Dismiss"
+              type="button"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       {/* 3. SIMPLE AUTO-EXPANDING & STRETCHABLE INPUT TEXTAREA */}
-      <div className="parakeet-input-container">
+      <div
+        className="parakeet-input-container no-drag"
+        onClick={() => {
+          window.assistant?.focusWindow?.();
+          textareaRef.current?.focus();
+        }}
+      >
         {/* Equalizer Wave Indicator */}
         <div className={`parakeet-wave ${loading ? 'thinking' : status.routingActive ? 'listening' : ''}`} title="Input visualizer">
           <span className="wave-bar bar-1" />
@@ -706,25 +1079,51 @@ export default function App() {
         </div>
 
         {/* Clean auto-expanding textarea (stretches, wraps text, max 4 lines, scrollbar) */}
-        <div className="textarea-wrapper">
+        <div
+          className="textarea-wrapper no-drag"
+          onClick={() => {
+            window.assistant?.focusWindow?.();
+            textareaRef.current?.focus();
+          }}
+        >
           <textarea
             ref={textareaRef}
             className="parakeet-textarea no-drag"
             placeholder={
               status.routingActive
                 ? 'Type your question (Enter to send, Shift+Enter for new line)…'
-                : 'Type here or press Ctrl+Shift+Space to route keyboard…'
+                : 'Type your question or paste prompt here…'
             }
             value={input}
             onChange={(e) => setBuffer(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
+            onFocus={() => {
+              window.assistant?.focusWindow?.();
+            }}
             rows={1}
             maxLength={MAX_PROMPT}
+            autoFocus
           />
         </div>
 
         {/* Action Buttons */}
         <div className="input-actions no-drag">
+          <button
+            className="pill-paste-btn"
+            onClick={async () => {
+              try {
+                const clip = await window.assistant?.getClipboard?.();
+                if (clip && clip.trim()) {
+                  handlePasteSelected(clip.trim());
+                }
+              } catch { }
+            }}
+            title="Paste text from clipboard / browser"
+            type="button"
+          >
+            Paste
+          </button>
+
           {input ? (
             <button
               className="pill-clear-btn"

@@ -22,7 +22,7 @@ async function callGroq({ apiKey, model, messages }) {
 }
 
 async function callGemini({ apiKey, model, messages }) {
-  const m = model || 'gemini-1.5-flash';
+  const m = model || 'gemini-3.8-flash';
   const cleanMessages = sanitizeMessages(messages);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
   const contents = cleanMessages.map((msg) => ({

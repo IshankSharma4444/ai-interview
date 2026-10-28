@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('assistant', {
   chat: (payload) => ipcRenderer.invoke('ai:chat', payload),
   getClipboard: () => ipcRenderer.invoke('clipboard:getText'),
   setClipboard: (text) => ipcRenderer.invoke('clipboard:setText', text),
+  onClipboardChanged: (callback) => subscribe('clipboard:changed', callback),
   hide: () => ipcRenderer.send('overlay:hide'),
   quit: () => ipcRenderer.send('app:quit'),
   logFocus: (note) => ipcRenderer.send('focus:log', note),
@@ -25,5 +26,6 @@ contextBridge.exposeInMainWorld('assistant', {
   keysStatus: () => ipcRenderer.invoke('keys:status'),
   testKey: (payload) => ipcRenderer.invoke('keys:test', payload),
   resizeWindow: (size) => ipcRenderer.invoke('window:resize', size),
-  getBounds: () => ipcRenderer.invoke('window:getBounds')
+  getBounds: () => ipcRenderer.invoke('window:getBounds'),
+  focusWindow: () => ipcRenderer.invoke('window:focus')
 });

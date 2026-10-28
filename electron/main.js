@@ -190,7 +190,7 @@ function createWindow() {
     backgroundColor: '#0b0d12',
     alwaysOnTop: true,
     skipTaskbar: true,
-    focusable: false,
+    focusable: true,
     resizable: true,
     minWidth: 380,
     minHeight: 260,
@@ -221,7 +221,10 @@ function createWindow() {
   });
   win.on('show', () => protectFromCapture('show'));
   win.on('ready-to-show', () => protectFromCapture('ready-to-show'));
-  win.on('focus', updateStatus);
+  win.on('focus', () => {
+    stopRouting();
+    updateStatus();
+  });
   win.on('blur', updateStatus);
   win.webContents.on('did-finish-load', () => protectFromCapture('did-finish-load'));
 
@@ -368,7 +371,8 @@ async function showOverlay() {
     return;
   }
 
-  win.showInactive();
+  win.show();
+  win.focus();
   win.setAlwaysOnTop(true, 'screen-saver');
   win.moveTop();
   protectFromCapture('after-show');
@@ -449,6 +453,19 @@ function registerIpc() {
     }
   });
 
+  let lastWatchedClipboard = '';
+  setInterval(() => {
+    try {
+      if (win && !win.isDestroyed()) {
+        const text = clipboard.readText();
+        if (text && text.trim() && text !== lastWatchedClipboard) {
+          lastWatchedClipboard = text;
+          win.webContents.send('clipboard:changed', text);
+        }
+      }
+    } catch {}
+  }, 350);
+
   ipcMain.handle('session:new', () => sessionManager.newSession());
   ipcMain.handle('session:state', () => sessionManager.getState());
   ipcMain.handle('session:switch', (_e, id) => sessionManager.switchSession(id));
@@ -469,6 +486,14 @@ function registerIpc() {
 
   ipcMain.handle('window:getBounds', () => {
     return win && !win.isDestroyed() ? win.getBounds() : null;
+  });
+
+  ipcMain.handle('window:focus', () => {
+    if (win && !win.isDestroyed()) {
+      win.focus();
+      return true;
+    }
+    return false;
   });
 
   ipcMain.handle('keys:add', (_e, payload) => {
