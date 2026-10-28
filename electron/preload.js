@@ -27,5 +27,6 @@ contextBridge.exposeInMainWorld('assistant', {
   testKey: (payload) => ipcRenderer.invoke('keys:test', payload),
   resizeWindow: (size) => ipcRenderer.invoke('window:resize', size),
   getBounds: () => ipcRenderer.invoke('window:getBounds'),
-  focusWindow: () => ipcRenderer.invoke('window:focus')
+  focusWindow: () => ipcRenderer.invoke('window:focus'),
+  copyForegroundSelection: () => ipcRenderer.invoke('clipboard:copyForegroundSelection')
 });

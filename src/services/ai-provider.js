@@ -16,7 +16,7 @@ async function callGroq({ apiKey, model, messages }) {
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: model || 'llama-3.3-70b-versatile', messages: cleanMessages, temperature: 0.7 }),
+      body: JSON.stringify({ model: model || 'openai/gpt-oss-120b', messages: cleanMessages, temperature: 0.7 }),
       signal: controller.signal
     });
     clearTimeout(timeoutId);
@@ -31,7 +31,7 @@ async function callGroq({ apiKey, model, messages }) {
 }
 
 async function callGemini({ apiKey, model, messages }) {
-  const m = model || 'gemini-1.5-flash';
+  const m = model || 'gemini-3.8-flash';
   const cleanMessages = sanitizeMessages(messages);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
   const contents = cleanMessages.map((msg) => ({

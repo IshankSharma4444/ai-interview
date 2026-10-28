@@ -334,7 +334,7 @@ export default function App() {
   const [provider, setProvider] = useState(import.meta.env.VITE_PROVIDER || 'groq');
   const [model, setModel] = useState(import.meta.env.VITE_MODEL || '');
   const [models, setModels] = useState({
-    groq: import.meta.env.VITE_GROQ_MODEL || import.meta.env.VITE_MODEL || 'llama-3.3-70b-versatile',
+    groq: import.meta.env.VITE_GROQ_MODEL || import.meta.env.VITE_MODEL || 'openai/gpt-oss-120b',
     gemini: import.meta.env.VITE_GEMINI_MODEL || 'gemini-3.8-flash',
     openai: import.meta.env.VITE_OPENAI_MODEL || 'gpt-4o-mini'
   });
@@ -1107,13 +1107,23 @@ export default function App() {
             className="pill-paste-btn"
             onClick={async () => {
               try {
-                const clip = await window.assistant?.getClipboard?.();
-                if (clip && clip.trim()) {
-                  handlePasteSelected(clip.trim());
+                let text = await window.assistant?.copyForegroundSelection?.();
+                if (!text || !text.trim()) {
+                  text = await window.assistant?.getClipboard?.();
                 }
-              } catch { }
+                if (text && text.trim()) {
+                  handlePasteSelected(text.trim());
+                }
+              } catch {
+                try {
+                  const clip = await window.assistant?.getClipboard?.();
+                  if (clip && clip.trim()) {
+                    handlePasteSelected(clip.trim());
+                  }
+                } catch { }
+              }
             }}
-            title="Paste text from clipboard / browser"
+            title="Paste selected text from browser / clipboard (no Ctrl+C needed)"
             type="button"
           >
             Paste

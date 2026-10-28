@@ -1,6 +1,6 @@
 const path = require('path');
 const http = require('http');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, clipboard } = require('electron');
 const { applyExcludeFromCapture } = require('./native/exclude-from-capture');
 const { SessionManager } = require('../src/services/session-manager');
@@ -30,8 +30,11 @@ const isFocusTest = process.env.FOCUS_TEST === '1';
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173';
 const TOGGLE_ACCELERATOR = 'CommandOrControl+Shift+Space';
 const FOREGROUND_SCRIPT = path.join(__dirname, 'native', 'foreground.ps1');
+const SELECTION_WATCHER_SCRIPT = path.join(__dirname, 'native', 'selection-watcher.ps1');
+const GRAB_SELECTION_SCRIPT = path.join(__dirname, 'native', 'grab-selection.ps1');
 
 let win = null;
+let selectionWatcherProcess = null;
 let routingActive = false;
 let routingFailures = [];
 let registeredRoutingKeys = [];
@@ -221,6 +224,7 @@ function createWindow() {
 
   win.on('closed', () => {
     stopCaptureProtectionLoop();
+    stopSelectionWatcher();
     win = null;
   });
   win.on('show', () => protectFromCapture('show'));
@@ -239,6 +243,7 @@ function createWindow() {
     console.error('[load] failed:', error);
   });
 
+  startSelectionWatcher();
   return win;
 }
 
@@ -259,6 +264,61 @@ function updateStatus() {
     win.webContents.send('overlay:status', status);
   }
   return status;
+}
+
+function startSelectionWatcher() {
+  if (selectionWatcherProcess) return;
+  try {
+    const overlayHwnd = win && !win.isDestroyed() && typeof win.getNativeWindowHandle === 'function'
+      ? String(win.getNativeWindowHandle().readInt32LE(0))
+      : '0';
+
+    selectionWatcherProcess = spawn(
+      'powershell.exe',
+      [
+        '-NoLogo',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        SELECTION_WATCHER_SCRIPT,
+        '-OverlayHwnd',
+        overlayHwnd
+      ],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }
+    );
+
+    selectionWatcherProcess.stdout.on('data', (chunk) => {
+      const msg = chunk.toString();
+      if (msg.includes('SELECTION_COPIED')) {
+        setTimeout(() => {
+          try {
+            if (win && !win.isDestroyed()) {
+              const text = clipboard.readText();
+              if (text && text.trim()) {
+                win.webContents.send('clipboard:changed', text.trim());
+              }
+            }
+          } catch {}
+        }, 70);
+      }
+    });
+
+    selectionWatcherProcess.on('exit', () => {
+      selectionWatcherProcess = null;
+    });
+  } catch (err) {
+    console.error('[selection-watcher] error starting:', err && err.message ? err.message : err);
+  }
+}
+
+function stopSelectionWatcher() {
+  if (selectionWatcherProcess) {
+    try {
+      selectionWatcherProcess.kill();
+    } catch {}
+    selectionWatcherProcess = null;
+  }
 }
 
 function queryForeground() {
@@ -472,6 +532,26 @@ function registerIpc() {
     } catch {
       return false;
     }
+  });
+
+  ipcMain.handle('clipboard:copyForegroundSelection', () => {
+    return new Promise((resolve) => {
+      execFile(
+        'powershell.exe',
+        ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', GRAB_SELECTION_SCRIPT],
+        { windowsHide: true, timeout: 4000 },
+        (_err, stdout) => {
+          setTimeout(() => {
+            try {
+              const text = clipboard.readText() || (stdout ? String(stdout).trim() : '');
+              resolve(text);
+            } catch {
+              resolve('');
+            }
+          }, 50);
+        }
+      );
+    });
   });
 
   let lastWatchedClipboard = '';
@@ -789,6 +869,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  stopSelectionWatcher();
   globalShortcut.unregisterAll();
   if (controlServer) {
     try {
