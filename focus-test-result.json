@@ -1,0 +1,17 @@
+{
+  "testedAt": "2026-10-28T15:27:27.032Z",
+  "automated": true,
+  "result": {
+    "pass": false,
+    "reason": "Electron exited early with code 0"
+  },
+  "chromePage": {
+    "loaded": 1,
+    "receivedKeys": [],
+    "receivedInput": [],
+    "focusEvents": 0
+  },
+  "electronLogTail": [
+    ""
+  ]
+}
