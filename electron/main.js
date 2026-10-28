@@ -3,6 +3,25 @@ const http = require('http');
 const { execFile } = require('child_process');
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, clipboard } = require('electron');
 const { applyExcludeFromCapture } = require('./native/exclude-from-capture');
+const { SessionManager } = require('../src/services/session-manager');
+const { KeyManager } = require('../src/services/key-manager');
+const { providers } = require('../src/services/ai-provider');
+
+const sessionManager = new SessionManager();
+const keyManager = new KeyManager();
+
+// Load env keys into key manager
+function loadEnvKeys() {
+  if (process.env.GROQ_API_KEY) {
+    keyManager.setKeys('groq', [{ id: 'env_groq', value: process.env.GROQ_API_KEY, enabled: true }]);
+  }
+  if (process.env.GEMINI_API_KEY) {
+    keyManager.setKeys('gemini', [{ id: 'env_gemini', value: process.env.GEMINI_API_KEY, enabled: true }]);
+  }
+  if (process.env.OPENAI_API_KEY) {
+    keyManager.setKeys('openai', [{ id: 'env_openai', value: process.env.OPENAI_API_KEY, enabled: true }]);
+  }
+}
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -156,8 +175,8 @@ function stopCaptureProtectionLoop() {
 
 function createWindow() {
   const { workArea } = screen.getPrimaryDisplay();
-  const width = 480;
-  const height = 560;
+  const width = 580;
+  const height = 660;
   const x = workArea.x + workArea.width - width - 24;
   const y = workArea.y + Math.round((workArea.height - height) / 2);
 
@@ -172,7 +191,11 @@ function createWindow() {
     alwaysOnTop: true,
     skipTaskbar: true,
     focusable: false,
-    resizable: false,
+    resizable: true,
+    minWidth: 380,
+    minHeight: 260,
+    maxWidth: 1600,
+    maxHeight: 1400,
     movable: true,
     minimizable: false,
     maximizable: false,
@@ -405,6 +428,8 @@ async function toggleOverlay() {
 }
 
 function registerIpc() {
+  sessionManager.init();
+
   ipcMain.handle('overlay:status', () => getStatus());
   ipcMain.handle('clipboard:getText', () => {
     try {
@@ -424,8 +449,70 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('ai:chat', async (_event, prompt) => {
-    if (typeof prompt !== 'string' || !prompt.trim()) {
+  ipcMain.handle('session:new', () => sessionManager.newSession());
+  ipcMain.handle('session:state', () => sessionManager.getState());
+  ipcMain.handle('session:switch', (_e, id) => sessionManager.switchSession(id));
+
+  ipcMain.handle('window:resize', (_e, { width, height }) => {
+    if (win && !win.isDestroyed()) {
+      const bounds = win.getBounds();
+      win.setBounds({
+        x: bounds.x,
+        y: bounds.y,
+        width: Math.max(380, width || bounds.width),
+        height: Math.max(260, height || bounds.height)
+      });
+      return true;
+    }
+    return false;
+  });
+
+  ipcMain.handle('window:getBounds', () => {
+    return win && !win.isDestroyed() ? win.getBounds() : null;
+  });
+
+  ipcMain.handle('keys:add', (_e, payload) => {
+    if (!payload || !payload.provider || !payload.key) return false;
+    const list = keyManager.keys[payload.provider] || [];
+    keyManager.setKeys(payload.provider, [...list, { id: `k_${Date.now()}`, value: payload.key, enabled: true }]);
+    return true;
+  });
+  ipcMain.handle('keys:remove', (_e, payload) => {
+    if (!payload || !payload.provider || !payload.id) return false;
+    keyManager.removeKey(payload.provider, payload.id);
+    return true;
+  });
+  ipcMain.handle('keys:status', () => {
+    return {
+      groq: keyManager.getKeysStatus('groq'),
+      gemini: keyManager.getKeysStatus('gemini'),
+      openai: keyManager.getKeysStatus('openai')
+    };
+  });
+  ipcMain.handle('keys:test', async (_e, payload) => {
+    if (!payload || !payload.provider) return { ok: false };
+    const provider = payload.provider;
+    const prov = providers[provider];
+    if (!prov) return { ok: false };
+    const key = keyManager.getUsableKey(provider);
+    if (!key) return { ok: false, error: 'no usable key' };
+    try {
+      const messages = [{ role: 'user', content: 'ping' }];
+      const resp = await prov.call({ apiKey: key.value, model: prov.defaultModel, messages });
+      if (resp.status === 401) { keyManager.markInvalid(provider, key.id); return { ok: false, reason: 'invalid' }; }
+      if (resp.status === 429) { keyManager.markRateLimited(provider, key.id, 60); return { ok: false, reason: 'rate_limited' }; }
+      const content = prov.parse(resp);
+      if (content) return { ok: true };
+      return { ok: false };
+    } catch (e) {
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  });
+
+  ipcMain.handle('ai:chat', async (_event, payload) => {
+    const p = typeof payload === 'string' ? { prompt: payload, provider: process.env.PROVIDER || 'groq', model: process.env.MODEL || process.env.GROQ_MODEL || process.env.GEMINI_MODEL || process.env.OPENAI_MODEL } : payload || {};
+    const prompt = typeof p.prompt === 'string' ? p.prompt : '';
+    if (!prompt.trim()) {
       return { error: 'Empty prompt.' };
     }
 
@@ -433,42 +520,107 @@ function registerIpc() {
       return { text: `Focus-test echo: ${prompt.trim()}` };
     }
 
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
-      return { error: 'Missing GROQ_API_KEY in .env' };
+    const providerName = p.provider || process.env.PROVIDER || 'groq';
+    const prov = providers[providerName];
+    if (!prov) {
+      return { error: 'Unknown provider.' };
+    }
+    let model = p.model || process.env.MODEL;
+    if (!model) {
+      if (providerName === 'groq') model = process.env.GROQ_MODEL || prov.defaultModel;
+      else if (providerName === 'gemini') model = process.env.GEMINI_MODEL || prov.defaultModel;
+      else if (providerName === 'openai') model = process.env.OPENAI_MODEL || prov.defaultModel;
+      else model = prov.defaultModel;
     }
 
-    const model = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+    const history = sessionManager.getMessagesForRequest();
+    const messages = [...history, { role: 'user', content: prompt.trim() }];
 
-    try {
-      const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: prompt.trim() }],
-          temperature: 0.7
-        })
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        return { error: `Groq error (${response.status}): ${errorText}` };
+    const maxRetries = 3;
+    let attempts = 0;
+    while (attempts < maxRetries) {
+      attempts += 1;
+      const key = keyManager.getUsableKey(providerName);
+      if (!key) break;
+      try {
+        const resp = await prov.call({ apiKey: key.value, model, messages });
+        if (resp.status === 429) {
+          const retryAfter = resp.headers && resp.headers.get ? resp.headers.get('retry-after') : null;
+          keyManager.markRateLimited(providerName, key.id, retryAfter ? parseInt(retryAfter, 10) : null);
+          if (attempts >= maxRetries) break;
+          await new Promise((r) => setTimeout(r, 500 * attempts));
+          continue;
+        }
+        if (resp.status === 401) {
+          keyManager.markInvalid(providerName, key.id);
+          if (attempts >= maxRetries) break;
+          await new Promise((r) => setTimeout(r, 250));
+          continue;
+        }
+        if (resp.status === 403) {
+          if (attempts >= maxRetries) break;
+          await new Promise((r) => setTimeout(r, 250));
+          continue;
+        }
+        if (resp.status >= 500) {
+          if (attempts >= maxRetries) break;
+          await new Promise((r) => setTimeout(r, 500 * attempts));
+          continue;
+        }
+        if (resp.status === 400) {
+          const msg = resp.data && resp.data.error && resp.data.error.message ? resp.data.error.message : `Provider error (${resp.status})`;
+          return { error: msg };
+        }
+        const content = prov.parse(resp);
+        if (content) {
+          sessionManager.addMessage('user', prompt.trim());
+          sessionManager.addMessage('assistant', content);
+          return { text: content };
+        }
+        break;
+      } catch (error) {
+        if (attempts >= maxRetries) break;
+        await new Promise((r) => setTimeout(r, 300 * attempts));
+        continue;
       }
-
-      const data = await response.json();
-      const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-      if (!content) {
-        return { error: 'Empty response from Groq.' };
-      }
-
-      return { text: content };
-    } catch (error) {
-      return { error: String(error && error.message ? error.message : error) };
     }
+
+    if (p.fallback && providerName !== 'groq') {
+      try {
+        const fallbackProv = providers['groq'];
+        const key = keyManager.getUsableKey('groq');
+        if (key) {
+          const resp = await fallbackProv.call({ apiKey: key.value, model: fallbackProv.defaultModel, messages });
+          const content = fallbackProv.parse(resp);
+          if (content) {
+            sessionManager.addMessage('user', prompt.trim());
+            sessionManager.addMessage('assistant', content);
+            return { text: content };
+          }
+        }
+      } catch {}
+    }
+
+    const envKey = process.env.GROQ_API_KEY;
+    if (envKey && providerName === 'groq') {
+      try {
+        const resp = await providers.groq.call({ apiKey: envKey, model, messages });
+        const content = providers.groq.parse(resp);
+        if (content) {
+          sessionManager.addMessage('user', prompt.trim());
+          sessionManager.addMessage('assistant', content);
+          return { text: content };
+        }
+        if (resp.status === 429 || resp.status >= 500) return { error: 'Rate limit or provider error. Try another key or later.' };
+        if (resp.status === 401) return { error: 'Invalid API key.' };
+        const detail = resp.data && resp.data.error && resp.data.error.message ? resp.data.error.message : `Groq error (${resp.status})`;
+        return { error: detail };
+      } catch (error) {
+        return { error: String(error && error.message ? error.message : error) };
+      }
+    }
+
+    return { error: 'All configured keys unavailable or request failed.' };
   });
 
   ipcMain.on('overlay:hide', () => {
@@ -545,6 +697,7 @@ function startControlServer() {
 }
 
 async function bootstrap() {
+  loadEnvKeys();
   registerIpc();
   createWindow();
 
