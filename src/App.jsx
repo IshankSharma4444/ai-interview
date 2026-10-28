@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 const INITIAL_STATUS = {
   visible: false,
@@ -349,6 +349,7 @@ export default function App() {
   const chatScrollRef = useRef(null);
   const textareaRef = useRef(null);
   const lastProcessedClipRef = useRef('');
+  const cursorPosRef = useRef(0);
 
   // Group messages into question-answer pairs
   const historyPairs = useMemo(() => {
@@ -403,75 +404,71 @@ export default function App() {
   const setBuffer = useCallback((value) => {
     bufferRef.current = value;
     setInput(value);
+    const el = textareaRef.current;
+    if (el) {
+      cursorPosRef.current = el.selectionStart ?? value.length;
+    } else {
+      cursorPosRef.current = value.length;
+    }
   }, []);
 
   useEffect(() => {
     adjustTextareaHeight();
   }, [input, adjustTextareaHeight]);
 
-  // Cursor-aware insertion & backspace for seamless in-place editing
-  const insertTextAtCursor = useCallback(
-    (text) => {
-      const el = textareaRef.current;
-      if (el) {
-        const start = el.selectionStart ?? el.value.length;
-        const end = el.selectionEnd ?? el.value.length;
-        const current = el.value;
-        const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
-        setBuffer(next);
-        const nextPos = Math.min(start + text.length, MAX_PROMPT);
-        setTimeout(() => {
-          if (el) {
-            el.focus();
-            el.setSelectionRange(nextPos, nextPos);
-          }
-        }, 0);
-      } else {
-        const next = (bufferRef.current + text).slice(0, MAX_PROMPT);
-        setBuffer(next);
-      }
-    },
-    [setBuffer]
-  );
+  // Maintain precise cursor position across React state updates
+  useLayoutEffect(() => {
+    if (textareaRef.current) {
+      const pos = Math.min(cursorPosRef.current, input.length);
+      textareaRef.current.setSelectionRange(pos, pos);
+    }
+  }, [input]);
+
+  // Cursor-aware insertion & backspace for background routed keys
+  const insertTextAtCursor = useCallback((text) => {
+    const el = textareaRef.current;
+    const current = bufferRef.current;
+    const start = el ? el.selectionStart : cursorPosRef.current;
+    const end = el ? el.selectionEnd : cursorPosRef.current;
+    const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
+    const nextPos = Math.min(start + text.length, MAX_PROMPT);
+    cursorPosRef.current = nextPos;
+    bufferRef.current = next;
+    setInput(next);
+  }, []);
 
   const backspaceAtCursor = useCallback(() => {
     const el = textareaRef.current;
-    if (el) {
-      const start = el.selectionStart ?? el.value.length;
-      const end = el.selectionEnd ?? el.value.length;
-      const current = el.value;
-      if (start !== end) {
-        const next = current.slice(0, start) + current.slice(end);
-        setBuffer(next);
-        setTimeout(() => {
-          if (el) {
-            el.focus();
-            el.setSelectionRange(start, start);
-          }
-        }, 0);
-      } else if (start > 0) {
-        const next = current.slice(0, start - 1) + current.slice(start);
-        setBuffer(next);
-        setTimeout(() => {
-          if (el) {
-            el.focus();
-            el.setSelectionRange(start - 1, start - 1);
-          }
-        }, 0);
-      }
-    } else {
-      setBuffer(bufferRef.current.slice(0, -1));
+    const current = bufferRef.current;
+    const start = el ? el.selectionStart : cursorPosRef.current;
+    const end = el ? el.selectionEnd : cursorPosRef.current;
+    if (start !== end) {
+      const next = current.slice(0, start) + current.slice(end);
+      cursorPosRef.current = start;
+      bufferRef.current = next;
+      setInput(next);
+    } else if (start > 0) {
+      const next = current.slice(0, start - 1) + current.slice(start);
+      cursorPosRef.current = start - 1;
+      bufferRef.current = next;
+      setInput(next);
     }
-  }, [setBuffer]);
+  }, []);
 
-  // Auto-focus input on mount
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-      }
-    }, 150);
-    return () => clearTimeout(timer);
+  const moveCursorLeft = useCallback(() => {
+    const el = textareaRef.current;
+    const start = el ? el.selectionStart : cursorPosRef.current;
+    const nextPos = Math.max(0, start - 1);
+    cursorPosRef.current = nextPos;
+    if (el) el.setSelectionRange(nextPos, nextPos);
+  }, []);
+
+  const moveCursorRight = useCallback(() => {
+    const el = textareaRef.current;
+    const end = el ? el.selectionEnd : cursorPosRef.current;
+    const nextPos = Math.min(bufferRef.current.length, end + 1);
+    cursorPosRef.current = nextPos;
+    if (el) el.setSelectionRange(nextPos, nextPos);
   }, []);
 
   const refreshSession = useCallback(async () => {
@@ -540,7 +537,7 @@ export default function App() {
     };
   }, [historyPairs]);
 
-  // Overlay keyboard listener
+  // Overlay keyboard listener (receives routed keys without stealing focus from background app)
   useEffect(() => {
     if (!window.assistant || !window.assistant.onKey) return;
     const removeKey = window.assistant.onKey((payload) => {
@@ -553,12 +550,20 @@ export default function App() {
         submitRef.current();
         return;
       }
+      if (payload.key === 'ArrowLeft') {
+        moveCursorLeft();
+        return;
+      }
+      if (payload.key === 'ArrowRight') {
+        moveCursorRight();
+        return;
+      }
       if (typeof payload.text === 'string') {
         insertTextAtCursor(payload.text);
       }
     });
     return removeKey;
-  }, [insertTextAtCursor, backspaceAtCursor]);
+  }, [insertTextAtCursor, backspaceAtCursor, moveCursorLeft, moveCursorRight]);
 
   // Status & polling
   useEffect(() => {
@@ -623,26 +628,17 @@ export default function App() {
       const text = typeof textToPaste === 'string' ? textToPaste : selectedTextBanner;
       if (!text) return;
       const el = textareaRef.current;
-      if (el) {
-        const start = el.selectionStart ?? el.value.length;
-        const end = el.selectionEnd ?? el.value.length;
-        const current = el.value;
-        const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
-        setBuffer(next);
-        setSelectedTextBanner('');
-        const nextPos = Math.min(start + text.length, MAX_PROMPT);
-        setTimeout(() => {
-          el.focus();
-          el.setSelectionRange(nextPos, nextPos);
-        }, 0);
-      } else {
-        const current = bufferRef.current;
-        const next = current ? `${current}\n${text}` : text;
-        setBuffer(next.slice(0, MAX_PROMPT));
-        setSelectedTextBanner('');
-      }
+      const current = bufferRef.current;
+      const start = el ? el.selectionStart : cursorPosRef.current;
+      const end = el ? el.selectionEnd : cursorPosRef.current;
+      const next = (current.slice(0, start) + text + current.slice(end)).slice(0, MAX_PROMPT);
+      const nextPos = Math.min(start + text.length, MAX_PROMPT);
+      cursorPosRef.current = nextPos;
+      bufferRef.current = next;
+      setInput(next);
+      setSelectedTextBanner('');
     },
-    [selectedTextBanner, setBuffer]
+    [selectedTextBanner]
   );
 
   // Copy helper
@@ -671,6 +667,7 @@ export default function App() {
 
   // Clear prompt
   const handleClearPrompt = useCallback(() => {
+    cursorPosRef.current = 0;
     setBuffer('');
     setError('');
     if (textareaRef.current) {
@@ -1063,13 +1060,7 @@ export default function App() {
       ) : null}
 
       {/* 3. SIMPLE AUTO-EXPANDING & STRETCHABLE INPUT TEXTAREA */}
-      <div
-        className="parakeet-input-container no-drag"
-        onClick={() => {
-          window.assistant?.focusWindow?.();
-          textareaRef.current?.focus();
-        }}
-      >
+      <div className="parakeet-input-container no-drag">
         {/* Equalizer Wave Indicator */}
         <div className={`parakeet-wave ${loading ? 'thinking' : status.routingActive ? 'listening' : ''}`} title="Input visualizer">
           <span className="wave-bar bar-1" />
@@ -1078,14 +1069,8 @@ export default function App() {
           <span className="wave-bar bar-4" />
         </div>
 
-        {/* Clean auto-expanding textarea (stretches, wraps text, max 4 lines, scrollbar) */}
-        <div
-          className="textarea-wrapper no-drag"
-          onClick={() => {
-            window.assistant?.focusWindow?.();
-            textareaRef.current?.focus();
-          }}
-        >
+        {/* Clean auto-expanding textarea */}
+        <div className="textarea-wrapper no-drag">
           <textarea
             ref={textareaRef}
             className="parakeet-textarea no-drag"
@@ -1095,14 +1080,24 @@ export default function App() {
                 : 'Type your question or paste prompt here…'
             }
             value={input}
-            onChange={(e) => setBuffer(e.target.value)}
-            onKeyDown={handleTextareaKeyDown}
-            onFocus={() => {
-              window.assistant?.focusWindow?.();
+            onChange={(e) => {
+              const val = e.target.value;
+              cursorPosRef.current = e.target.selectionStart;
+              bufferRef.current = val;
+              setInput(val);
             }}
+            onSelect={(e) => {
+              cursorPosRef.current = e.target.selectionStart;
+            }}
+            onClick={(e) => {
+              cursorPosRef.current = e.target.selectionStart;
+            }}
+            onKeyUp={(e) => {
+              cursorPosRef.current = e.target.selectionStart;
+            }}
+            onKeyDown={handleTextareaKeyDown}
             rows={1}
             maxLength={MAX_PROMPT}
-            autoFocus
           />
         </div>
 

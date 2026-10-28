@@ -105,6 +105,10 @@ function buildRoutingKeys() {
   add('Shift+Enter', { type: 'enter' });
   add('Escape', { type: 'escape' });
   add('Shift+Escape', { type: 'escape' });
+  add('Left', { type: 'arrow-left' });
+  add('Right', { type: 'arrow-right' });
+  add('Up', { type: 'arrow-up' });
+  add('Down', { type: 'arrow-down' });
 
   return entries;
 }
@@ -190,7 +194,7 @@ function createWindow() {
     backgroundColor: '#0b0d12',
     alwaysOnTop: true,
     skipTaskbar: true,
-    focusable: true,
+    focusable: false,
     resizable: true,
     minWidth: 380,
     minHeight: 260,
@@ -221,10 +225,7 @@ function createWindow() {
   });
   win.on('show', () => protectFromCapture('show'));
   win.on('ready-to-show', () => protectFromCapture('ready-to-show'));
-  win.on('focus', () => {
-    stopRouting();
-    updateStatus();
-  });
+  win.on('focus', updateStatus);
   win.on('blur', updateStatus);
   win.webContents.on('did-finish-load', () => protectFromCapture('did-finish-load'));
 
@@ -312,6 +313,27 @@ function handleRoutedKey(action) {
 
   if (action.type === 'enter') {
     win.webContents.send('overlay:key', { key: 'Enter' });
+    return;
+  }
+
+  if (action.type === 'arrow-left') {
+    win.webContents.send('overlay:key', { key: 'ArrowLeft' });
+    return;
+  }
+
+  if (action.type === 'arrow-right') {
+    win.webContents.send('overlay:key', { key: 'ArrowRight' });
+    return;
+  }
+
+  if (action.type === 'arrow-up') {
+    win.webContents.send('overlay:key', { key: 'ArrowUp' });
+    return;
+  }
+
+  if (action.type === 'arrow-down') {
+    win.webContents.send('overlay:key', { key: 'ArrowDown' });
+    return;
   }
 }
 
@@ -371,8 +393,7 @@ async function showOverlay() {
     return;
   }
 
-  win.show();
-  win.focus();
+  win.showInactive();
   win.setAlwaysOnTop(true, 'screen-saver');
   win.moveTop();
   protectFromCapture('after-show');
@@ -488,13 +509,7 @@ function registerIpc() {
     return win && !win.isDestroyed() ? win.getBounds() : null;
   });
 
-  ipcMain.handle('window:focus', () => {
-    if (win && !win.isDestroyed()) {
-      win.focus();
-      return true;
-    }
-    return false;
-  });
+  ipcMain.handle('window:focus', () => false);
 
   ipcMain.handle('keys:add', (_e, payload) => {
     if (!payload || !payload.provider || !payload.key) return false;

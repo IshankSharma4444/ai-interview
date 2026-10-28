@@ -988,12 +988,10 @@ h4.formatted-heading {
   align-items: center;
   min-height: 34px;
   -webkit-app-region: no-drag;
-  cursor: text;
-  user-select: text;
-  -webkit-user-select: text;
+  cursor: text !important;
 }
 
-/* Natural, clean textarea (wraps lines, auto-height up to 4 lines, then scrolls) */
+/* Simple, clean, natural textarea */
 .parakeet-textarea {
   width: 100%;
   min-height: 34px;
@@ -1001,21 +999,20 @@ h4.formatted-heading {
   background: transparent;
   border: none;
   outline: none;
-  color: var(--text-main);
+  color: #f8fafc;
   font-family: inherit;
   font-size: 13.5px;
   line-height: 1.45;
   resize: none;
   padding: 6px 4px;
-  overflow-y: hidden;
+  overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  cursor: text !important;
   user-select: text !important;
   -webkit-user-select: text !important;
-  cursor: text !important;
-  caret-color: #38bdf8 !important; /* Bright cyan, highly visible blinking cursor */
+  caret-color: #38bdf8 !important; /* Bright cyan blinking cursor */
   -webkit-app-region: no-drag !important;
-  pointer-events: auto !important;
 }
 
 .parakeet-textarea::selection {
@@ -1026,6 +1023,7 @@ h4.formatted-heading {
 .parakeet-textarea::placeholder {
   color: var(--text-dim);
   font-style: italic;
+  font-size: 13px;
 }
 
 /* Input Action Buttons */

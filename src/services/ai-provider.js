@@ -10,47 +10,74 @@ function sanitizeMessages(messages) {
 
 async function callGroq({ apiKey, model, messages }) {
   const cleanMessages = sanitizeMessages(messages);
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: model || 'llama-3.3-70b-versatile', messages: cleanMessages, temperature: 0.7 })
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = null; }
-  return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model || 'llama-3.3-70b-versatile', messages: cleanMessages, temperature: 0.7 }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    return { ok: false, status: 504, data: { error: { message: err.name === 'AbortError' ? 'Groq API request timed out (15s).' : err.message } } };
+  }
 }
 
 async function callGemini({ apiKey, model, messages }) {
-  const m = model || 'gemini-3.8-flash';
+  const m = model || 'gemini-1.5-flash';
   const cleanMessages = sanitizeMessages(messages);
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${apiKey}`;
   const contents = cleanMessages.map((msg) => ({
     role: msg.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: msg.content }]
   }));
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ contents })
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = null; }
-  return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    return { ok: false, status: 504, data: { error: { message: err.name === 'AbortError' ? 'Gemini API request timed out (12s).' : err.message } } };
+  }
 }
 
 async function callOpenAI({ apiKey, model, messages }) {
   const cleanMessages = sanitizeMessages(messages);
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: model || 'gpt-4o-mini', messages: cleanMessages, temperature: 0.7 })
-  });
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch { data = null; }
-  return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model || 'gpt-4o-mini', messages: cleanMessages, temperature: 0.7 }),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    return { ok: res.ok, status: res.status, headers: res.headers, data, text };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    return { ok: false, status: 504, data: { error: { message: err.name === 'AbortError' ? 'OpenAI API request timed out (15s).' : err.message } } };
+  }
 }
 
 function parseGroq(resp) {
